@@ -10,29 +10,22 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { ScenarioInputs } from "./scenario-inputs";
+import { ScenarioResults } from "./scenario-results";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
-  ResponsiveContainer,
-} from "recharts";
-import { format } from "date-fns";
+  calculateImpliedVolatility,
+  calculateWarrantValue,
+} from "@/lib/financial-calculations";
 
 interface Scenario {
   name: string;
-  data: { month: number; price: number }[];
+  data: {
+    month: number;
+    price: number;
+    upperBound: number;
+    lowerBound: number;
+  }[];
 }
 
 const EnhancedWarrantCalculator = () => {
@@ -40,18 +33,19 @@ const EnhancedWarrantCalculator = () => {
   const [strikePrice, setStrikePrice] = useState(460);
   const [warrantPrice, setWarrantPrice] = useState(8.145);
   const [volatility, setVolatility] = useState(0.3);
-  const [currentStockPrice, setCurrentStockPrice] = useState(200);
-  const [endDate, setEndDate] = useState("2026-12-31");
-  const [predicted2025, setPredicted2025] = useState(300);
-  const [predicted2026, setPredicted2026] = useState(400);
-  const [worstCase2025, setWorstCase2025] = useState(150);
-  const [worstCase2026, setWorstCase2026] = useState(200);
-  const [bestCase2025, setBestCase2025] = useState(450);
-  const [bestCase2026, setBestCase2026] = useState(600);
-  const [exchangeRate, setExchangeRate] = useState(1); // EUR per USD
+  const [currentStockPrice, setCurrentStockPrice] = useState(360);
+  const [endDate, setEndDate] = useState("2026-06-26");
+  const [predicted2025, setPredicted2025] = useState(500);
+  const [predicted2026, setPredicted2026] = useState(1000);
+  const [worstCase2025, setWorstCase2025] = useState(350);
+  const [worstCase2026, setWorstCase2026] = useState(350);
+  const [bestCase2025, setBestCase2025] = useState(800);
+  const [bestCase2026, setBestCase2026] = useState(1200);
   const [scenarios, setScenarios] = useState<Scenario[]>([]);
   const [results, setResults] = useState<any[]>([]);
   const [totalMonths, setTotalMonths] = useState(0);
+  const [volatilityRange, setVolatilityRange] = useState(0.2);
+  const [riskFreeRate, setRiskFreeRate] = useState(0.03);
 
   useEffect(() => {
     generateScenarios();
@@ -83,19 +77,39 @@ const EnhancedWarrantCalculator = () => {
       const monthsTo2025 = Math.min(totalMonthsCalculated, 24);
       const monthsTo2026 = totalMonthsCalculated - monthsTo2025;
 
+      // Modified volatility range calculation
+      const getVolatilityRange = (month: number) => {
+        // Square root of time to better reflect how uncertainty grows
+        const timeEffect = Math.sqrt(month / totalMonthsCalculated);
+        return volatilityRange * timeEffect;
+      };
+
       for (let i = 0; i <= monthsTo2025; i++) {
+        const basePrice =
+          currentStockPrice +
+          (target2025 - currentStockPrice) * (i / monthsTo2025);
+
+        const range = getVolatilityRange(i);
+        // Apply range as a percentage of the base price
         data.push({
           month: i,
-          price:
-            currentStockPrice +
-            (target2025 - currentStockPrice) * (i / monthsTo2025),
+          price: basePrice,
+          upperBound: basePrice * (1 + range),
+          lowerBound: basePrice * (1 - range),
         });
       }
 
       for (let i = 1; i <= monthsTo2026; i++) {
+        const basePrice =
+          target2025 + (target2026 - target2025) * (i / monthsTo2026);
+
+        const range = getVolatilityRange(monthsTo2025 + i);
+        // Apply range as a percentage of the base price
         data.push({
           month: monthsTo2025 + i,
-          price: target2025 + (target2026 - target2025) * (i / monthsTo2026),
+          price: basePrice,
+          upperBound: basePrice * (1 + range),
+          lowerBound: basePrice * (1 - range),
         });
       }
 
@@ -111,71 +125,84 @@ const EnhancedWarrantCalculator = () => {
     setScenarios(newScenarios);
   };
 
-  const cumulativeNormalDistribution = (x: number) => {
-    var sign = x >= 0 ? 1 : -1;
-    x = Math.abs(x) / Math.sqrt(2);
-    var t = 1 / (1 + 0.3275911 * x);
+  const now = new Date();
+  const expiryDate = new Date(endDate);
+  const timeToExpiry =
+    (expiryDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24 * 365);
 
-    var a1 = 0.254829592;
-    var a2 = -0.284496736;
-    var a3 = 1.421413741;
-    var a4 = -1.453152027;
-    var a5 = 1.061405429;
-
-    var erf =
-      1 - ((((a5 * t + a4) * t + a3) * t + a2) * t + a1) * t * Math.exp(-x * x);
-    return 0.5 * (1 + sign * erf);
-  };
-
-  const blackScholesCallPrice = (
-    S: number,
-    K: number,
-    T: number,
-    r: number,
-    sigma: number
-  ) => {
-    if (T <= 0) {
-      return Math.max(0, S - K);
-    }
-    var d1 =
-      (Math.log(S / K) + (r + (sigma * sigma) / 2) * T) /
-      (sigma * Math.sqrt(T));
-    var d2 = d1 - sigma * Math.sqrt(T);
-    var N_d1 = cumulativeNormalDistribution(d1);
-    var N_d2 = cumulativeNormalDistribution(d2);
-    var callPrice = S * N_d1 - K * Math.exp(-r * T) * N_d2;
-    return callPrice;
-  };
+  const initialImpliedVolatility = calculateImpliedVolatility(
+    warrantPrice,
+    currentStockPrice,
+    strikePrice,
+    timeToExpiry,
+    riskFreeRate,
+    1
+  );
 
   const calculateResults = () => {
     const resultData = scenarios.flatMap((scenario) => {
       return scenario.data.map((point) => {
         let T = (totalMonths - point.month) / 12;
         if (T <= 0) {
-          T = 0.0001; // To avoid division by zero or negative time
+          T = 0.0001;
         }
 
-        const S = point.price; // Stock price in USD
-        const K = strikePrice; // Strike price in USD
-        const r = 0.01; // Risk-free interest rate (1%)
-        const sigma = volatility; // Volatility
+        const mainInvestmentValue = calculateWarrantValue({
+          stockPrice: point.price,
+          strikePrice,
+          timeToExpiryYears: T,
+          exchangeRate: 1,
+          investment,
+          initialWarrantPrice: warrantPrice,
+          impliedVolatility: initialImpliedVolatility,
+          riskFreeRate,
+        });
 
-        // Calculate warrant price using Black-Scholes formula
-        const callPriceUSD = blackScholesCallPrice(S, K, T, r, sigma);
-        const totalWarrantPrice = callPriceUSD * exchangeRate; // Convert to EUR
+        const upperInvestmentValue = calculateWarrantValue({
+          stockPrice: point.upperBound,
+          strikePrice,
+          timeToExpiryYears: T,
+          exchangeRate: 1,
+          investment,
+          initialWarrantPrice: warrantPrice,
+          impliedVolatility: initialImpliedVolatility,
+          riskFreeRate,
+        });
 
-        const warrantsBought = investment / warrantPrice; // Number of warrants bought initially
-        const currentInvestmentValue = totalWarrantPrice * warrantsBought;
-        const profitLossPercentage =
-          ((currentInvestmentValue - investment) / investment) * 100;
+        const lowerInvestmentValue = calculateWarrantValue({
+          stockPrice: point.lowerBound,
+          strikePrice,
+          timeToExpiryYears: T,
+          exchangeRate: 1,
+          investment,
+          initialWarrantPrice: warrantPrice,
+          impliedVolatility: initialImpliedVolatility,
+          riskFreeRate,
+        });
+
+        const calculateProfitLoss = (value: number) => {
+          return ((value - investment) / investment) * 100;
+        };
 
         return {
           scenario: scenario.name,
           month: point.month,
           teslaPrice: point.price.toFixed(2),
-          warrantPrice: totalWarrantPrice.toFixed(2),
-          investmentValue: currentInvestmentValue.toFixed(2),
-          profitLossPercentage: profitLossPercentage.toFixed(2),
+          upperBound: point.upperBound.toFixed(2),
+          lowerBound: point.lowerBound.toFixed(2),
+          warrantPrice: (
+            mainInvestmentValue /
+            (investment / warrantPrice)
+          ).toFixed(2),
+          investmentValue: mainInvestmentValue.toFixed(2),
+          upperInvestmentValue: upperInvestmentValue.toFixed(2),
+          lowerInvestmentValue: lowerInvestmentValue.toFixed(2),
+          profitLossPercentage:
+            calculateProfitLoss(mainInvestmentValue).toFixed(2),
+          upperProfitLossPercentage:
+            calculateProfitLoss(upperInvestmentValue).toFixed(2),
+          lowerProfitLossPercentage:
+            calculateProfitLoss(lowerInvestmentValue).toFixed(2),
         };
       });
     });
@@ -199,7 +226,7 @@ const EnhancedWarrantCalculator = () => {
               htmlFor="investment"
               className="block text-sm font-medium text-gray-700 mb-1"
             >
-              Initial Investment (€)
+              Initial Investment ($)
             </label>
             <Input
               id="investment"
@@ -227,7 +254,7 @@ const EnhancedWarrantCalculator = () => {
               htmlFor="warrantPrice"
               className="block text-sm font-medium text-gray-700 mb-1"
             >
-              Initial Warrant Price (€)
+              Initial Warrant Price ($)
             </label>
             <Input
               id="warrantPrice"
@@ -283,114 +310,48 @@ const EnhancedWarrantCalculator = () => {
           </div>
           <div>
             <label
-              htmlFor="exchangeRate"
+              htmlFor="volatilityRange"
               className="block text-sm font-medium text-gray-700 mb-1"
             >
-              Exchange Rate (EUR per USD)
+              Price Volatility Range (%)
             </label>
             <Input
-              id="exchangeRate"
+              id="volatilityRange"
               type="number"
-              step="0.0001"
-              value={exchangeRate}
-              onChange={(e) => setExchangeRate(parseFloat(e.target.value) || 0)}
+              step="1"
+              value={volatilityRange * 100}
+              onChange={(e) =>
+                setVolatilityRange(
+                  Math.max(0, Math.min(100, parseFloat(e.target.value) || 0)) /
+                    100
+                )
+              }
             />
           </div>
         </div>
 
         <div className="grid grid-cols-3 gap-4 mb-6">
-          <div>
-            <label
-              htmlFor="predicted2025"
-              className="block text-sm font-medium text-gray-700 mb-1"
-            >
-              Predicted Price 2025 ($)
-            </label>
-            <Input
-              id="predicted2025"
-              type="number"
-              value={predicted2025}
-              onChange={(e) =>
-                setPredicted2025(parseFloat(e.target.value) || 0)
-              }
-            />
-          </div>
-          <div>
-            <label
-              htmlFor="predicted2026"
-              className="block text-sm font-medium text-gray-700 mb-1"
-            >
-              Predicted Price 2026 ($)
-            </label>
-            <Input
-              id="predicted2026"
-              type="number"
-              value={predicted2026}
-              onChange={(e) =>
-                setPredicted2026(parseFloat(e.target.value) || 0)
-              }
-            />
-          </div>
-          <div>
-            <label
-              htmlFor="worstCase2025"
-              className="block text-sm font-medium text-gray-700 mb-1"
-            >
-              Worst Case 2025 ($)
-            </label>
-            <Input
-              id="worstCase2025"
-              type="number"
-              value={worstCase2025}
-              onChange={(e) =>
-                setWorstCase2025(parseFloat(e.target.value) || 0)
-              }
-            />
-          </div>
-          <div>
-            <label
-              htmlFor="worstCase2026"
-              className="block text-sm font-medium text-gray-700 mb-1"
-            >
-              Worst Case 2026 ($)
-            </label>
-            <Input
-              id="worstCase2026"
-              type="number"
-              value={worstCase2026}
-              onChange={(e) =>
-                setWorstCase2026(parseFloat(e.target.value) || 0)
-              }
-            />
-          </div>
-          <div>
-            <label
-              htmlFor="bestCase2025"
-              className="block text-sm font-medium text-gray-700 mb-1"
-            >
-              Best Case 2025 ($)
-            </label>
-            <Input
-              id="bestCase2025"
-              type="number"
-              value={bestCase2025}
-              onChange={(e) => setBestCase2025(parseFloat(e.target.value) || 0)}
-            />
-          </div>
-          <div>
-            <label
-              htmlFor="bestCase2026"
-              className="block text-sm font-medium text-gray-700 mb-1"
-            >
-              Best Case 2026 ($)
-            </label>
-            <Input
-              id="bestCase2026"
-              type="number"
-              value={bestCase2026}
-              onChange={(e) => setBestCase2026(parseFloat(e.target.value) || 0)}
-            />
-          </div>
+          <ScenarioInputs
+            title="Expected Scenario"
+            price2025={predicted2025}
+            price2026={predicted2026}
+            onPrice2025Change={setPredicted2025}
+            onPrice2026Change={setPredicted2026}
+          />
+          <ScenarioInputs
+            title="Worst Case Scenario"
+            price2025={worstCase2025}
+            price2026={worstCase2026}
+            onPrice2025Change={setWorstCase2025}
+            onPrice2026Change={setWorstCase2026}
+          />
+          <ScenarioInputs
+            title="Best Case Scenario"
+            price2025={bestCase2025}
+            price2026={bestCase2026}
+            onPrice2025Change={setBestCase2025}
+            onPrice2026Change={setBestCase2026}
+          />
         </div>
 
         <Button onClick={calculateResults} className="mb-6">
@@ -398,74 +359,28 @@ const EnhancedWarrantCalculator = () => {
         </Button>
 
         {results.length > 0 && (
-          <div>
-            <h3 className="text-lg font-semibold mb-2">Results</h3>
-            <div className="mb-6">
-              <ResponsiveContainer width="100%" height={400}>
-                <LineChart data={results}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="month" />
-                  <YAxis yAxisId="left" />
-                  <YAxis yAxisId="right" orientation="right" />
-                  <Tooltip />
-                  <Legend />
-                  <Line
-                    yAxisId="left"
-                    type="monotone"
-                    dataKey="teslaPrice"
-                    stroke="#8884d8"
-                    name="Stock Price ($)"
-                  />
-                  <Line
-                    yAxisId="right"
-                    type="monotone"
-                    dataKey="investmentValue"
-                    stroke="#82ca9d"
-                    name="Investment Value (€)"
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Scenario</TableHead>
-                  <TableHead>Month</TableHead>
-                  <TableHead>Stock Price ($)</TableHead>
-                  <TableHead>Warrant Price (€)</TableHead>
-                  <TableHead>Investment Value (€)</TableHead>
-                  <TableHead>Profit/Loss (%)</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {results.map((result, index) => (
-                  <TableRow key={index}>
-                    <TableCell>{result.scenario}</TableCell>
-                    <TableCell>
-                      {format(
-                        new Date().setMonth(
-                          new Date().getMonth() + result.month
-                        ),
-                        "MMM yyyy"
-                      )}
-                    </TableCell>
-                    <TableCell>{result.teslaPrice}</TableCell>
-                    <TableCell>{result.warrantPrice}</TableCell>
-                    <TableCell>{result.investmentValue}</TableCell>
-                    <TableCell
-                      className={
-                        parseFloat(result.profitLossPercentage) >= 0
-                          ? "text-green-600"
-                          : "text-red-600"
-                      }
-                    >
-                      {result.profitLossPercentage}%
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
+          <Tabs defaultValue="expected" className="w-full">
+            <TabsList className="grid w-full grid-cols-3">
+              <TabsTrigger value="expected">Expected Scenario</TabsTrigger>
+              <TabsTrigger value="worst">Worst Case Scenario</TabsTrigger>
+              <TabsTrigger value="best">Best Case Scenario</TabsTrigger>
+            </TabsList>
+            <TabsContent value="expected">
+              <ScenarioResults
+                results={results.filter((r) => r.scenario === "Expected")}
+              />
+            </TabsContent>
+            <TabsContent value="worst">
+              <ScenarioResults
+                results={results.filter((r) => r.scenario === "Worst Case")}
+              />
+            </TabsContent>
+            <TabsContent value="best">
+              <ScenarioResults
+                results={results.filter((r) => r.scenario === "Best Case")}
+              />
+            </TabsContent>
+          </Tabs>
         )}
       </CardContent>
     </Card>
